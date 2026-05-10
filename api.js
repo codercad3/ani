@@ -6,13 +6,14 @@ const BASE_URL = "reanime.to";
 
 const app = express();
 
-async function extract_source(id, episode, server) {
+async function extract_source(id, episode, server, type) {
   const { data } = await axios.get(
     `https://${BASE_URL}/api/flix/${id}/${episode}`,
   );
 
   const finalised_server = data.servers.find(
-    (serverItem) => serverItem.serverName === server,
+    (serverItem) =>
+      serverItem.serverName === server && serverItem.dataType === type,
   );
 
   if (!finalised_server) {
@@ -50,11 +51,16 @@ app.get("/servers/:id/:episode", async (req, res) => {
   }
 });
 
-app.get("/sources/:id/:episode/:server_name", async (req, res) => {
+app.get("/sources/:id/:episode/:server_name/:type", async (req, res) => {
   try {
-    const { id, episode, server_name } = req.params;
+    const { id, episode, server_name, type } = req.params;
 
-    const resp = await extract_source(id, episode, server_name.toUpperCase());
+    const resp = await extract_source(
+      id,
+      episode,
+      server_name.toUpperCase(),
+      type.toLowerCase(),
+    );
 
     res.json({
       success: true,
