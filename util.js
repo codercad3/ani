@@ -1,179 +1,130 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
+import JSON5 from "json5";
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36";
+const HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+  Referer: "https://flixcloud.cc/",
+};
 
-class SubtitleFile {
-  lang;
-  url;
+const API = "https://enc-dec.app/api";
 
-  constructor(lang, url) {
-    this.lang = lang;
-    this.url = url;
+function validate(data, path) {
+  if (data.status !== 200) {
+    console.log(`\n${"-".repeat(25)} API ERROR ${"-".repeat(25)}\n`);
+    console.log(`Path: ${path}`);
+    console.log(`Status Code: ${data.status}`);
+    console.log(`Error: ${data.error || "unknown"}`);
+    process.exit(1);
   }
+
+  return data.result;
 }
 
-class FlixCloud {
-  name;
-  mainUrl;
-  requiresReferer;
-
-  constructor() {
-    this.name = "FlixCloud";
-    this.mainUrl = "https://flixcloud.cc";
-    this.requiresReferer = false;
-  }
-
-  async getUrl(url) {
-    const subtitles = [];
-
-    const headers = {
-      Referer: `${this.mainUrl}/`,
-      "User-Agent": USER_AGENT,
-    };
+export async function flix_extract() {
+  try {
+    // Sample flixcloud URL
+    const url = "https://flixcloud.cc/e/5o4rjvbx8ad0";
 
     // Fetch page
-    const res = await axios.get(url, { headers });
+    const { data: html } = await axios.get(url, {
+      headers: HEADERS,
+    });
 
-    const $ = cheerio.load(res.data);
+    const $ = cheerio.load(html);
 
-    // Find script containing video_id
-    let script = null;
+    // Search all script tags for the embedded data object
+    let extracted = null;
 
     $("script").each((_, el) => {
-      const text = $(el).html();
+      const content = $(el).html() || "";
 
-      if (text && text.includes("video_id")) {
-        script = text;
+      const match = content.match(
+        /type:\s*"data",\s*data:\s*(\{[\s\S]*?\})\s*,\s*uses:/,
+      );
+
+      if (match) {
+        extracted = match[1];
+        return false; // break loop
       }
     });
 
-    if (!script) {
-      throw new Error("Video script not found");
+    if (!extracted) {
+      throw new Error("Unable to locate embedded data object");
     }
 
-    // Find data object
-    const start = script.indexOf("data:{");
+    const data = JSON5.parse(extracted);
 
-    if (start === -1) {
-      throw new Error("Data object not found");
-    }
-
-    const from = script.indexOf("{", start);
-
-    let depth = 0;
-    let end = -1;
-
-    for (let i = from; i < script.length; i++) {
-      if (script[i] === "{") {
-        depth++;
-      } else if (script[i] === "}") {
-        depth--;
-
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
-    }
-
-    if (end === -1) {
-      throw new Error("Invalid object structure");
-    }
-
-    const rawData = script.substring(from, end + 1);
-
-    // Convert JS object -> valid JSON
-    const fixedJson = rawData.replace(
-      /([{,]\s*)([A-Za-z0-9_]+)(\s*:)/g,
-      '$1"$2"$3',
-    );
-
-    let data;
-
-    try {
-      data = JSON.parse(fixedJson);
-    } catch (e) {
-      console.error("JSON parse failed:", e);
-      throw new Error("Failed to parse player data");
-    }
-
-    // Subtitles
-    if (Array.isArray(data.subtitles)) {
-      for (const sub of data.subtitles) {
-        subtitles.push(new SubtitleFile(sub.language || "Unknown", sub.url));
-      }
-    }
-
+    // Optional subtitles
+    const subtitles = data.subtitles || [];
     delete data.subtitles;
 
-    // Resolve token
-    const resolveRes = await axios.post(
-      "https://enc-dec.app/api/dec-reanime?type=resolve",
-      {
-        data,
-      },
+    // Resolve stream token
+    const decToken = `${API}/dec-flixcloud?type=token`;
+
+    const tokenResponse = await axios.post(
+      decToken,
+      { data },
       {
         headers: {
           "Content-Type": "application/json",
         },
-        timeout: 10000,
       },
     );
 
-    const resolved = resolveRes.data?.result;
+    const tokenValidated = validate(tokenResponse.data, decToken);
 
-    if (!resolved) {
-      throw new Error("Failed to resolve token");
-    }
+    // Fetch encrypted stream
+    const streamUrl = `https://flixcloud.cc/api/m3u8/${tokenValidated.token}`;
 
-    // Fetch m3u8 token response
-    const tokenResponse = await axios.get(
-      `${this.mainUrl}/api/m3u8/${resolved.token}`,
-      {
-        headers: {
-          Referer: `${this.mainUrl}/`,
-          "User-Agent": USER_AGENT,
-        },
-      },
-    );
+    const streamResponse = await axios.get(streamUrl, {
+      headers: HEADERS,
+    });
 
     // Decrypt stream
-    const decryptRes = await axios.post(
-      "https://enc-dec.app/api/dec-reanime?type=decrypt",
-      {
-        data: {
-          state: resolveRes.data.result.state,
-          token_response: tokenResponse.data,
-        },
+    const decStream = `${API}/dec-flixcloud?type=stream`;
+
+    const streamPayload = {
+      data: {
+        context: tokenValidated.context,
+        stream_response: streamResponse.data,
       },
-      {
-        headers: {
-          "Content-Type": "application/json",
-        },
-        timeout: 10000,
-      },
-    );
-
-    const decrypted = decryptRes.data?.result;
-
-    if (!decrypted) {
-      throw new Error("Failed to decrypt stream");
-    }
-
-    // Return final response
-    return {
-      source: this.name,
-      url: decrypted.stream,
-      type: "m3u8",
-      subtitles,
     };
+
+    const decryptedResponse = await axios.post(decStream, streamPayload, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const streamResolved = validate(decryptedResponse.data, decStream);
+
+    // console.log(`\n${"-".repeat(25)} Decrypted Url ${"-".repeat(25)}\n`);
+
+    // console.log(`Referer: ${HEADERS.Referer}\n`);
+    // console.log(streamResolved.stream);
+
+    // if (subtitles.length) {
+    //   console.log("\nSubtitles:");
+    //   console.log(subtitles);
+    // }
+
+    // Get decrypted manifest
+    const params = new URLSearchParams({
+      url: streamResolved.stream,
+      w_payload: streamResolved.context.w_payload,
+    });
+
+    // const parseManifest = `${API}/parse-flixcloud?${params}`;
+    // const manifestResponse = await axios.get(parseManifest);
+    // console.log(`\n${"-".repeat(25)} Decrypted Manifest ${"-".repeat(25)}\n`);
+    // console.log(manifestResponse.data);
+
+    const final = { url: streamResolved.stream, subtitles };
+    return final;
+  } catch (err) {
+    console.error("Error:", err.response?.data || err.message);
+    return err.message;
   }
-}
-
-export async function flix_extract(url) {
-  const flix = new FlixCloud();
-
-  return await flix.getUrl(url);
 }
