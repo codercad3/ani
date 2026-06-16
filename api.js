@@ -2,16 +2,20 @@ import axios from "axios";
 import express from "express";
 import { flix_extract } from "./util.js";
 import { extract_fallback } from "./fallback.js";
+import { createProxyAgent } from "./proxy.js"; 
 
 const BASE_URL = "reanime.to";
+
+const proxyAgent = createProxyAgent();
 
 const app = express();
 
 async function extract_source(id, episode, server, type) {
   const { data } = await axios.get(
     `https://${BASE_URL}/api/flix/${id}/${episode}`,
+    { httpsAgent: proxyAgent }
   );
-
+  
   const finalised_server = data.servers.find(
     (serverItem) =>
       serverItem.serverName === server &&
@@ -29,8 +33,10 @@ async function extract_source(id, episode, server, type) {
 
 async function extract_servers(id, episode) {
   try {
+    // 4. Pass the proxyAgent to the axios configuration here too
     const { data } = await axios.get(
       `https://${BASE_URL}/api/flix/${id}/${episode}`,
+      { httpsAgent: proxyAgent }
     );
 
     return data.servers;
@@ -60,8 +66,6 @@ app.get("/servers/:id/:episode", async (req, res) => {
 app.get("/sources/:id/:episode/fallback/:type", async (req, res) => {
   try {
     const { id, episode, type } = req.params;
-
-    console.log("Fallback:", id, episode, type);
 
     const resp = await extract_fallback(
       id,
