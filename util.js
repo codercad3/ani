@@ -29,10 +29,10 @@ function validate(data, path) {
   return data.result;
 }
 
-export async function flix_extract() {
+export async function flix_extract(url) {
   try {
     // Sample flixcloud URL
-    const url = "https://flixcloud.cc/e/5o4rjvbx8ad0";
+    // const url = "https://flixcloud.cc/e/5o4rjvbx8ad0";
 
     // Fetch page
     const { data: html } = await axios.get(url, {
