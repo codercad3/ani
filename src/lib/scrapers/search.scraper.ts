@@ -1,0 +1,212 @@
+import { fetchPage } from '../fetcher';
+import { AnimeCard, SearchResult, FilterResult, FilterParams, EpisodeStatus } from '../types';
+import * as cheerio from 'cheerio';
+import type { AnyNode } from 'domhandler';
+
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
+
+function parseCardEpisodeStatus($el: cheerio.Cheerio<AnyNode>): EpisodeStatus {
+  const status: EpisodeStatus = {};
+  const subText = $el.find('.ep-status.sub span').first().text().trim();
+  const dubText = $el.find('.ep-status.dub span').first().text().trim();
+  const totalText = $el.find('.ep-status.total span').first().text().trim();
+  if (subText) status.sub = parseInt(subText, 10) || null;
+  if (dubText) status.dub = parseInt(dubText, 10) || null;
+  if (totalText) status.total = parseInt(totalText, 10) || null;
+  return status;
+}
+
+function parseAnimeGrid($: cheerio.CheerioAPI, selector: string, excludeSidebar = false): AnimeCard[] {
+  const results: AnimeCard[] = [];
+  $(selector).each((_, el) => {
+    const $el = $(el);
+    if (excludeSidebar && $el.closest('.sidebar, #sidebar, #top-anime, .top-anime').length > 0) {
+      return;
+    }
+
+    const href = $el.attr('href') ?? $el.find('a').first().attr('href') ?? '';
+    const slug = href.replace(/^https?:\/\/[^/]+/, '').replace(/^\/watch\//, '').replace(/\/ep-\d+$/, '').replace(/\/$/, '');
+    const $poster = $el.find('.poster, [data-tip]').first();
+    const id = $poster.attr('data-tip') ?? slug;
+
+    const scoreText = $el.find('.score').text().replace(/[^0-9.]/g, '').trim();
+    const epCountText = $el.find('.meta .dot').filter((__, d) => {
+      return /\d+ Eps/.test($(d).text());
+    }).text().replace(/[^0-9]/g, '').trim();
+
+    const yearText = $el.find('.meta .dot').last().text().trim();
+    const image = $el.find('img').first().attr('src') ?? '';
+
+    results.push({
+      id,
+      slug,
+      title: $el.find('.name, .d-title').first().text().trim(),
+      titleJp: $el.find('.name, .d-title').first().attr('data-jp')?.trim(),
+      image,
+      href: `/api/anime/${slug}`,
+      type: $el.find('.meta .dot:not(.ep-wrap):not(.score)').first().text().trim() || undefined,
+      episodes: parseCardEpisodeStatus($el),
+      date: yearText || undefined,
+      score: scoreText ? parseFloat(scoreText) : undefined,
+      totalEpisodes: epCountText ? parseInt(epCountText, 10) : undefined,
+    });
+  });
+  return results;
+}
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+export async function scrapeSearch(keyword: string, page = 1): Promise<SearchResult> {
+  const url = page > 1 
+    ? `/filter?keyword=${encodeURIComponent(keyword)}&page=${page}`
+    : `/filter?keyword=${encodeURIComponent(keyword)}`;
+  const $ = await fetchPage(url);
+  const results = parseAnimeGrid($, '.items.flw-wrap .film_list-wrap .flw-item, .film_list-wrap .flw-item, .ani.items .item, section .items .item', true);
+  
+  const currentPage = page;
+  const hasNextPage =
+    $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0 ||
+    $('.pagination a[rel="next"], .paging a[rel="next"], a[rel="next"]').length > 0;
+
+  let maxPage = currentPage;
+  const lastPageHref = $('.pagination a[title="Last"], .paging a[title="Last"]').attr('href');
+  if (lastPageHref) {
+    const match = lastPageHref.match(/page=(\d+)/);
+    if (match) {
+      maxPage = parseInt(match[1], 10);
+    }
+  } else {
+    $('.pagination a.page-link, .paging a.page-link, .pagination a.page-numbers, .paging a.page-numbers').each((_, el) => {
+      const pageText = $(el).text().trim();
+      const pageNum = parseInt(pageText, 10);
+      if (!isNaN(pageNum) && pageNum > maxPage) {
+        maxPage = pageNum;
+      }
+    });
+  }
+
+  return { results, keyword, currentPage, hasNextPage, hasPreviousPage: currentPage > 1, maxPage, minPage: 1 };
+}
+
+// ─── Filter ───────────────────────────────────────────────────────────────────
+
+function buildFilterUrl(params: FilterParams): string {
+  const qs = new URLSearchParams();
+  if (params.keyword) qs.set('keyword', params.keyword);
+  // Anikoto TV uses hidden type="" and actual type is in term_type[]
+  qs.set('type', '');
+  if (params.genre?.length) params.genre.forEach((g) => qs.append('genre[]', g));
+  if (params.season?.length) params.season.forEach((s) => qs.append('season[]', s));
+  if (params.year?.length) params.year.forEach((y) => qs.append('year[]', y));
+  if (params.type?.length) params.type.forEach((t) => qs.append('term_type[]', t));
+  if (params.status?.length) params.status.forEach((s) => qs.append('status[]', s));
+  if (params.language?.length) params.language.forEach((l) => qs.append('language[]', l));
+  if (params.rating?.length) params.rating.forEach((r) => qs.append('rating[]', r));
+  if (params.sort) qs.set('sort', params.sort);
+  if (params.page) qs.set('page', params.page);
+  return `/filter?${qs.toString()}`;
+}
+
+export async function scrapeFilter(params: FilterParams): Promise<FilterResult> {
+  const $ = await fetchPage(buildFilterUrl(params));
+
+  // Try multiple selectors since the site may vary
+  const results = parseAnimeGrid(
+    $,
+    '.film_list-wrap .flw-item, .ani.items .item, .items.flw-wrap .flw-item, #list-items .item, .page-content .item',
+    true
+  );
+
+  const currentPage = parseInt(params.page ?? '1', 10);
+  const hasNextPage =
+    $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0 ||
+    $('.pagination a[rel="next"], .paging a[rel="next"], a[rel="next"]').length > 0;
+
+  let maxPage = currentPage;
+  const lastPageHref = $('.pagination a[title="Last"], .paging a[title="Last"]').attr('href');
+  if (lastPageHref) {
+    const match = lastPageHref.match(/page=(\d+)/);
+    if (match) {
+      maxPage = parseInt(match[1], 10);
+    }
+  } else {
+    $('.pagination a.page-link, .paging a.page-link, .pagination a.page-numbers, .paging a.page-numbers').each((_, el) => {
+      const pageText = $(el).text().trim();
+      const pageNum = parseInt(pageText, 10);
+      if (!isNaN(pageNum) && pageNum > maxPage) {
+        maxPage = pageNum;
+      }
+    });
+  }
+
+  const topRated = parseAnimeGrid(
+    $,
+    'aside.sidebar .item, .sidebar .item, #body .scaff.side.items.md .item',
+    false
+  );
+
+  return {
+    results,
+    topRated: topRated.length > 0 ? topRated : undefined,
+    currentPage,
+    hasNextPage,
+    hasPreviousPage: currentPage > 1,
+    maxPage,
+    minPage: 1,
+    params,
+  };
+}
+
+// ─── Listing pages (Latest/Popular/Ongoing etc.) ──────────────────────────────
+
+export async function scrapeListingPage(
+  path: string,
+  page = 1
+): Promise<{ results: AnimeCard[]; topRated?: AnimeCard[]; currentPage: number; hasNextPage: boolean; hasPreviousPage: boolean; minPage?: number; maxPage?: number }> {
+  const url = page > 1 ? `${path}?page=${page}` : path;
+  const $ = await fetchPage(url);
+
+  const results = parseAnimeGrid(
+    $,
+    '.film_list-wrap .flw-item, .ani.items .item, .items .item, .page-content .item',
+    true
+  );
+
+  const topRated = parseAnimeGrid(
+    $,
+    'aside.sidebar .item, .sidebar .item, #body .scaff.side.items.md .item',
+    false
+  );
+
+  const hasNextPage =
+    $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0 ||
+    $('.pagination a[rel="next"], .paging a[rel="next"], a[rel="next"]').length > 0;
+
+  let maxPage = page;
+  const lastPageHref = $('.pagination a[title="Last"], .paging a[title="Last"]').attr('href');
+  if (lastPageHref) {
+    const match = lastPageHref.match(/page=(\d+)/);
+    if (match) {
+      maxPage = parseInt(match[1], 10);
+    }
+  } else {
+    $('.pagination a.page-link, .paging a.page-link, .pagination a.page-numbers, .paging a.page-numbers').each((_, el) => {
+      const pageText = $(el).text().trim();
+      const pageNum = parseInt(pageText, 10);
+      if (!isNaN(pageNum) && pageNum > maxPage) {
+        maxPage = pageNum;
+      }
+    });
+  }
+
+  return {
+    results,
+    topRated: topRated.length > 0 ? topRated : undefined,
+    currentPage: page,
+    hasNextPage,
+    hasPreviousPage: page > 1,
+    minPage: 1,
+    maxPage,
+  };
+}

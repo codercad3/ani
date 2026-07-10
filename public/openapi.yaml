@@ -1,0 +1,1019 @@
+openapi: 3.0.3
+info:
+  title: Anikoto Scraper API
+  description: |
+    A high-performance REST API for scraping anime data from **anikoto.net** — built with Next.js, Cheerio, and in-memory caching.
+
+    ## Response Format
+    All endpoints return a consistent JSON envelope:
+    ```json
+    { "ok": true, "data": { ... }, "cached": true }
+    ```
+    On error:
+    ```json
+    { "ok": false, "message": "Error description" }
+    ```
+
+    ## Caching
+    | Endpoint | TTL |
+    |----------|-----|
+    | `/api/home` | 5 minutes |
+    | `/api/anime/:slug` | 30 minutes |
+    | `/api/search` | 2 minutes |
+    | `/api/filter` | 5 minutes |
+    | `/api/schedule` | 1 hour |
+    | Episodes | 10 minutes |
+
+    Add `?refresh=1` to any cached endpoint to bypass the cache.
+  version: "1.0.0"
+  contact:
+    name: 
+
+servers:
+  - url: http://localhost:3000/api
+    description: Production server
+  - url: /api
+    description: Local development server
+
+tags:
+  - name: Home
+    description: Homepage data
+  - name: Anime
+    description: Anime detail and episodes
+  - name: Browse
+    description: Browse, filter and search
+  - name: Schedule
+    description: Weekly airing schedule
+  - name: Watch
+    description: Streaming sources and proxy
+
+paths:
+  /home:
+    get:
+      tags: [Home]
+      summary: Homepage data
+      description: >
+        Returns spotlight carousel, latest episodes, new release, top anime by day/week/month.
+      operationId: getHome
+      parameters:
+        - $ref: '#/components/parameters/refresh'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/HomeData'
+              example:
+                ok: true
+                cached: false
+                data:
+                  spotlight: []
+                  latestEpisodes: []
+                  newRelease: []
+                  newAdded: []
+                  justCompleted: []
+                  topDay: []
+                  topWeek: []
+                  topMonth: []
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /search:
+    get:
+      tags: [Browse]
+      summary: Search anime by keyword
+      operationId: searchAnime
+      parameters:
+        - name: keyword
+          in: query
+          required: true
+          description: Search keyword
+          schema:
+            type: string
+            example: one piece
+        - $ref: '#/components/parameters/refresh'
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/SearchResult'
+              example:
+                ok: true
+                cached: false
+                data:
+                  keyword: one piece
+                  totalResults: 42
+                  results: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /filter:
+    get:
+      tags: [Browse]
+      summary: Advanced anime filter
+      description: Filter anime with multiple combinable parameters.
+      operationId: filterAnime
+      parameters:
+        - name: keyword
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Search keyword
+        - name: genre[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Genre ID. Example: 1 (Action), 2 (Adventure), 3 (Fantasy)"
+        - name: season[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [spring, summer, fall, winter]
+          description: Season filter
+        - name: year[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+          description: Year filter (e.g. 2026, 2025)
+        - name: term_type[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [Movie, Music, ONA, OVA, Special, TV]
+          description: Media type filter
+        - name: status[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [currently-airing, finished-airing, not-yet-aired]
+          description: Airing status filter
+        - name: language[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [sub, dub]
+          description: Language filter
+        - name: rating[]
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [G, PG, PG-13, R, R+, Rx]
+          description: Age rating filter
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - default
+              - latest-updated
+              - latest-added
+              - score
+              - name-az
+              - release-date
+              - most-viewed
+              - number_of_episodes
+            default: default
+          description: Sort order
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+      responses:
+        '200':
+          description: Filtered results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/FilterResult'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /anime/{slug}:
+    get:
+      tags: [Anime]
+      summary: Anime detail
+      description: Get full anime info including title, synopsis, genres, studios, MAL score, episode count and status.
+      operationId: getAnimeDetail
+      parameters:
+        - $ref: '#/components/parameters/slug'
+        - $ref: '#/components/parameters/refresh'
+      responses:
+        '200':
+          description: Anime detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AnimeDetail'
+              example:
+                ok: true
+                cached: true
+                data:
+                  id: 21
+                  slug: 21
+                  title: One Piece
+                  type: TV
+                  status: Currently Airing
+                  malScore: 8.9
+                  genres: [Action, Adventure, Comedy]
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /anime/{slug}/episodes:
+    get:
+      tags: [Anime]
+      summary: Anime episode list
+      description: Get all episodes for a given anime slug, optionally filtered by episode range.
+      operationId: getAnimeEpisodes
+      parameters:
+        - $ref: '#/components/parameters/slug'
+        - $ref: '#/components/parameters/refresh'
+        - name: start
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Starting episode number (inclusive)
+          example: "5"
+        - name: end
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Ending episode number (inclusive)
+          example: "10"
+      responses:
+        '200':
+          description: Episode list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AnimeEpisodes'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /anime/{slug}/related:
+    get:
+      tags: [Anime]
+      summary: Related anime listing
+      description: Returns related anime (watch order/sequels/prequels/etc.) for a given anime slug.
+      operationId: getAnimeRelated
+      parameters:
+        - $ref: '#/components/parameters/slug'
+        - $ref: '#/components/parameters/refresh'
+      responses:
+        '200':
+          description: Related anime list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RelatedAnime'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /anime/{slug}/recommendations:
+    get:
+      tags: [Anime]
+      summary: Anime recommendations listing
+      description: Returns recommended anime cards for a given anime slug.
+      operationId: getAnimeRecommendations
+      parameters:
+        - $ref: '#/components/parameters/slug'
+        - $ref: '#/components/parameters/refresh'
+      responses:
+        '200':
+          description: Recommendations listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnimeCard'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /latest:
+    get:
+      tags: [Browse]
+      summary: Latest / popular anime listing
+      description: Paginated listing of latest-updated, new-release, or most-viewed anime.
+      operationId: getLatest
+      parameters:
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [latest-updated, new-release, most-viewed]
+            default: latest-updated
+          description: Listing type
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+      responses:
+        '200':
+          description: Listing results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnimeCard'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /status:
+    get:
+      tags: [Browse]
+      summary: Browse anime by airing status
+      operationId: getByStatus
+      parameters:
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [currently-airing, finished-airing, not-yet-aired]
+            default: currently-airing
+          description: Airing status
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+      responses:
+        '200':
+          description: Status listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnimeCard'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /genre/{genre}:
+    get:
+      tags: [Browse]
+      summary: Browse anime by genre
+      operationId: getByGenre
+      parameters:
+        - name: genre
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Genre slug (e.g. action, romance, isekai, fantasy)
+          example: action
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+      responses:
+        '200':
+          description: Genre listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnimeCard'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /type/{type}:
+    get:
+      tags: [Browse]
+      summary: Browse anime by media type
+      operationId: getByType
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [tv, movie, ova, ona, special, music]
+          description: Media type
+          example: movie
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+      responses:
+        '200':
+          description: Type listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnimeCard'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /schedule:
+    get:
+      tags: [Schedule]
+      summary: Weekly airing schedule
+      description: Get the weekly airing schedule grouped by day of the week.
+      operationId: getSchedule
+      parameters:
+        - $ref: '#/components/parameters/refresh'
+      responses:
+        '200':
+          description: Weekly schedule
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ScheduleDay'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /watch/{slug}:
+    get:
+      tags: [Watch]
+      summary: Streaming sources for an episode
+      description: >
+        Returns available streaming servers and direct m3u8 URLs (with optional proxy & subtitles) for a specific episode.
+      operationId: watchEpisode
+      parameters:
+        - $ref: '#/components/parameters/slug'
+        - name: ep
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Episode number to watch
+          example: "1"
+      responses:
+        '200':
+          description: Streaming sources
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  cached:
+                    type: boolean
+                  data:
+                    type: object
+                    description: Streaming server list with m3u8 URLs and subtitle tracks
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /proxy:
+    get:
+      tags: [Watch]
+      summary: Streaming proxy
+      description: >
+        Internal proxy to bypass Cloudflare and CORS restrictions for m3u8 video streams and subtitle files.
+        Rewrites segment URLs within m3u8 playlists to keep them routed through the proxy.
+      operationId: proxyStream
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+          description: The target m3u8 or subtitle URL to proxy
+          example: "https://cdn.mewstream.buzz/.../master.m3u8"
+        - name: referer
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uri
+          description: Referer header to bypass hotlink protection
+          example: "https://megaplay.buzz/"
+      responses:
+        '200':
+          description: Proxied stream data
+          content:
+            application/vnd.apple.mpegurl:
+              schema:
+                type: string
+                description: m3u8 playlist with rewritten segment URLs
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/Error'
+
+components:
+  parameters:
+    slug:
+      name: slug
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Anime slug from the URL (e.g. 21)
+      example: 21
+
+    refresh:
+      name: refresh
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: ["1"]
+      description: Set to `1` to bypass cache and force a fresh scrape
+
+  schemas:
+    # ─── Shared ────────────────────────────────────────────────────
+    EpisodeStatus:
+      type: object
+      properties:
+        sub:
+          type: integer
+          nullable: true
+        dub:
+          type: integer
+          nullable: true
+        total:
+          type: integer
+          nullable: true
+
+    AnimeCard:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        title:
+          type: string
+        titleJp:
+          type: string
+        image:
+          type: string
+          format: uri
+        href:
+          type: string
+        type:
+          type: string
+        episodes:
+          $ref: '#/components/schemas/EpisodeStatus'
+        date:
+          type: string
+        score:
+          type: number
+        totalEpisodes:
+          type: integer
+
+    # ─── Home ──────────────────────────────────────────────────────
+    SpotlightAnime:
+      type: object
+      properties:
+        slug:
+          type: string
+        title:
+          type: string
+        titleJp:
+          type: string
+        rating:
+          type: string
+        quality:
+          type: string
+        hasDub:
+          type: boolean
+        hasSub:
+          type: boolean
+        date:
+          type: string
+        synopsis:
+          type: string
+        watchUrl:
+          type: string
+        href:
+          type: string
+        image:
+          type: string
+          format: uri
+
+    HomeData:
+      type: object
+      properties:
+        spotlight:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpotlightAnime'
+        latestEpisodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        newRelease:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        newAdded:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        justCompleted:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        topDay:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        topWeek:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        topMonth:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+
+    # ─── Anime Detail ──────────────────────────────────────────────
+    RelatedAnime:
+      type: object
+      properties:
+        id:
+          type: string
+        malId:
+          type: string
+        title:
+          type: string
+        titleJp:
+          type: string
+        image:
+          type: string
+          format: uri
+        relation:
+          type: string
+        href:
+          type: string
+        slug:
+          type: string
+
+    Episode:
+      type: object
+      properties:
+        number:
+          type: string
+        title:
+          type: string
+        href:
+          type: string
+        id:
+          type: string
+        dataIds:
+          type: string
+        hasDub:
+          type: boolean
+        hasSub:
+          type: boolean
+
+    AnimeEpisodes:
+      type: object
+      properties:
+        animeId:
+          type: string
+        slug:
+          type: string
+        episodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Episode'
+
+    AnimeDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        title:
+          type: string
+        titleJp:
+          type: string
+        alternativeTitles:
+          type: array
+          items:
+            type: string
+        image:
+          type: string
+          format: uri
+        rating:
+          type: string
+        quality:
+          type: string
+        hasDub:
+          type: boolean
+        hasSub:
+          type: boolean
+        synopsis:
+          type: string
+        type:
+          type: string
+        premiered:
+          type: string
+        aired:
+          type: string
+        status:
+          type: string
+        genres:
+          type: array
+          items:
+            type: string
+        malScore:
+          type: number
+        duration:
+          type: string
+        episodeCount:
+          type: integer
+        studios:
+          type: array
+          items:
+            type: string
+        producers:
+          type: array
+          items:
+            type: string
+        watchUrl:
+          type: string
+        episodes:
+          $ref: '#/components/schemas/AnimeEpisodes'
+
+    # ─── Search / Filter ───────────────────────────────────────────
+    SearchResult:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        keyword:
+          type: string
+        currentPage:
+          type: integer
+        hasNextPage:
+          type: boolean
+        hasPreviousPage:
+          type: boolean
+        maxPage:
+          type: integer
+        minPage:
+          type: integer
+        totalResults:
+          type: integer
+
+    FilterResult:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+        currentPage:
+          type: integer
+        hasNextPage:
+          type: boolean
+        hasPreviousPage:
+          type: boolean
+        maxPage:
+          type: integer
+        minPage:
+          type: integer
+        params:
+          type: object
+
+    # ─── Schedule ──────────────────────────────────────────────────
+    ScheduleDay:
+      type: object
+      properties:
+        day:
+          type: string
+          description: Day of the week (e.g. Monday)
+        animes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnimeCard'
+
+    # ─── API Error ─────────────────────────────────────────────────
+    ApiError:
+      type: object
+      required: [ok, message]
+      properties:
+        ok:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "Internal server error"
+
+  responses:
+    Error:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            ok: false
+            message: Failed to fetch data from source
+
+    BadRequest:
+      description: Bad request — missing or invalid parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            ok: false
+            message: Missing required parameter
+
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            ok: false
+            message: Anime not found
